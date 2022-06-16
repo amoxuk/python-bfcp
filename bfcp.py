@@ -275,21 +275,13 @@ class BFCPAttr(dpkt.Packet):
         self.real_len = 4
         super().__init__(*args, **kwargs)
         if not args and 'len' not in kwargs:
-            self.len = self.__len__()
+            self.len = 4
         if 'value' in kwargs:
             self.value = kwargs['value']
         if 'child' in kwargs:
             self.child = kwargs['child']
         # if hasattr(self, 'data'):
         #     del self.data
-
-    def __len__(self):
-        if isinstance(self.data, list):
-            return len(self.data)
-        elif isinstance(self.data, BFCPAttr):
-            return len(self.data)
-        else:
-            return 4
 
     def __eq__(self, other):
         key = ['len', 'type', 'mandatory', 'value', 'child']
@@ -323,6 +315,7 @@ class BFCPAttr(dpkt.Packet):
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
         current = 0
+        value = 0
         if self.type == AttrType.SUPPORTED_PRIMITIVES:
             self.real_len = buf[1]
         elif self.type == AttrType.SUPPORTED_ATTRIBUTES:
@@ -332,29 +325,32 @@ class BFCPAttr(dpkt.Packet):
         elif self.type == AttrType.STATUS_INFO:
             # with none child
             self.real_len = buf[1]
-        if get_should_len(self.real_len) == len(buf):
-            if self.type == AttrType.SUPPORTED_PRIMITIVES:
-                self.value = [sp for sp in self.data]
-            elif self.type == AttrType.SUPPORTED_ATTRIBUTES:
-                self.value = [sp >> 1 for sp in self.data]
-            elif self.type in DOUBLE_WORD_START_ATTR_TYPE:
-                self.value = struct.unpack('!H', self.data)[0]
-            elif self.type == AttrType.REQUEST_STATUS:
-                self.value = list(struct.unpack('!2B', self.data))
-            elif self.type == AttrType.STATUS_INFO:
-                # with none child
-                self.value = self.data[0:self.real_len].decode()
-        else:
+        # if get_should_len(self.real_len) == len(buf):
+        data = self.data[0:self.real_len - self.__hdr_len__]
+        if self.type == AttrType.SUPPORTED_PRIMITIVES:
+            value = [sp for sp in data]
+        elif self.type == AttrType.SUPPORTED_ATTRIBUTES:
+            value = [sp >> 1 for sp in data]
+        elif self.type in DOUBLE_WORD_START_ATTR_TYPE:
+            value = struct.unpack('!H', data)[0]
+        elif self.type == AttrType.REQUEST_STATUS:
+            value = list(struct.unpack('!2B', data))
+        elif self.type == AttrType.STATUS_INFO:
+            # with none child
+            value = data.decode()
+        if get_should_len(self.real_len) != len(buf):
             current = get_should_len(self.real_len)
-            length = len(buf) - current
             pos = 0
             buf = buf[current:]
+            length = len(buf)
             while pos < length:
-                self.child.append(BFCPAttr(buf[pos:pos + get_should_len(buf[pos + 1])]))
-                pos += get_should_len(buf[1])
+                start = pos + get_should_len(buf[pos + 1])
+                self.child.append(BFCPAttr(buf[pos:start]))
+                pos = start
             if len(self.child) == 1:
                 self.child = self.child[0]
         self.data = b''
+        self.value = value
 
 
 def test_hello():
@@ -404,9 +400,11 @@ def test_hello_ack():
         '01030227'
         '5B39'
         '0228'
-        '1711'  # attr primitives
+        '17'
+        '13'  # attr primitives
         '0102030405060708090a0b0c0d0e0f101100'
-        '1512'
+        '15'
+        '14'
         '020406080a0c0e10121416181a1c1e202224'
     )
     b = BFCP()
@@ -415,13 +413,13 @@ def test_hello_ack():
     b.trans = 23353
     b.user = 552
     b.attrs = [
-        BFCPAttr(type=AttrType.SUPPORTED_PRIMITIVES, len=17, mandatory=1,
+        BFCPAttr(type=AttrType.SUPPORTED_PRIMITIVES, len=19, mandatory=1,
                  value=[Primitive.FloorRequest, Primitive.FloorRelease, Primitive.FloorRequestQuery,
                         Primitive.FloorRequestStatus, Primitive.UserQuery, Primitive.UserStatus, Primitive.FloorQuery,
                         Primitive.FloorStatus, Primitive.ChairAction, Primitive.ChairActionAck, Primitive.Hello,
                         Primitive.HelloAck, Primitive.Error, Primitive.FloorRequestStatusAck, Primitive.FloorStatusAck,
                         Primitive.Goodbye, Primitive.GoodbyeAck]),
-        BFCPAttr(type=AttrType.SUPPORTED_ATTRIBUTES, len=18, mandatory=1,
+        BFCPAttr(type=AttrType.SUPPORTED_ATTRIBUTES, len=20, mandatory=1,
                  value=[AttrType.BENEFICIARY_ID, AttrType.FLOOR_ID, AttrType.FLOOR_REQUEST_ID,
                         AttrType.PRIORITY, AttrType.REQUEST_STATUS, AttrType.ERROR_CODE,
                         AttrType.ERROR_INFO, AttrType.PARTICIPANT_PROVIDED_INFO,
@@ -441,7 +439,7 @@ def test_hello_ack():
     assert b.conf == 16974375
     assert b.trans == 23353
     assert b.user == 552
-    assert b.attrs[0] == BFCPAttr(type=AttrType.SUPPORTED_PRIMITIVES, len=17, mandatory=1,
+    assert b.attrs[0] == BFCPAttr(type=AttrType.SUPPORTED_PRIMITIVES, len=19, mandatory=1,
                                   value=[Primitive.FloorRequest, Primitive.FloorRelease, Primitive.FloorRequestQuery,
                                          Primitive.FloorRequestStatus, Primitive.UserQuery, Primitive.UserStatus,
                                          Primitive.FloorQuery,
@@ -451,7 +449,7 @@ def test_hello_ack():
                                          Primitive.FloorStatusAck,
                                          Primitive.Goodbye, Primitive.GoodbyeAck])
 
-    assert b.attrs[1] == BFCPAttr(type=AttrType.SUPPORTED_ATTRIBUTES, len=18, mandatory=1,
+    assert b.attrs[1] == BFCPAttr(type=AttrType.SUPPORTED_ATTRIBUTES, len=20, mandatory=1,
                                   value=[AttrType.BENEFICIARY_ID, AttrType.FLOOR_ID,
                                          AttrType.FLOOR_REQUEST_ID,
                                          AttrType.PRIORITY, AttrType.REQUEST_STATUS, AttrType.ERROR_CODE,
@@ -584,23 +582,23 @@ def test_status_info():
     s = unhexlify(
         '30'
         '04'  # FloorRequestStatus
-        '0008'  # payload length
+        '0009'  # payload length
         '01030227'  # conf
         '5B39'  # trans
         '0228'  # user
         '1f'  # attr type mandatory
-        '20'  # attr length 
+        '24'  # attr length 
         '0000'  # floor id
         '25'  # attr type mandatory
-        '18'  # attr length 
+        '1c'  # attr length 
         '0001'  # floor id
         '0b'  # attr type mandatory
         '04'  # attr length 
         '0300'  # floor id
-        '13'  # attr type mandatory
-        '10'  # attr length 
-        '73746174757320696e666f2074657874'  # status info text  
-        '2f'  # attr type mandatory
+        '13'  # attr type mandatory 
+        '12'  # attr length     
+        '73746174757320696e666f20746578740000'  # status info text  16+2
+        '23'  # attr type mandatory
         '04'  # attr length 
         '0002'  # floor id
     )
@@ -610,15 +608,15 @@ def test_status_info():
     assert p.r == 1
     assert p.primitive == Primitive.FloorRequestStatus
     assert p.conf == 16974375
-    assert p.len == 8
+    assert p.len == 9
     assert p.trans == 23353
     assert p.user == 552
-    assert p.attrs == BFCPAttr(type=AttrType.FLOOR_REQUEST_INFORMATION, mandatory=1, len=32, value=0,  # 4
-                               child=[BFCPAttr(type=AttrType.OVERALL_REQUEST_STATUS, mandatory=1, len=24, value=1,  # 4
+    assert p.attrs == BFCPAttr(type=AttrType.FLOOR_REQUEST_INFORMATION, mandatory=1, len=36, value=0,  # 4
+                               child=[BFCPAttr(type=AttrType.OVERALL_REQUEST_STATUS, mandatory=1, len=28, value=1,  # 4
                                                child=[
-                                                   BFCPAttr(type=AttrType.REQUEST_STATUS, mandatory=1, len=4,  # 4
-                                                            value=[StatusCode.Granted, 0]),
-                                                   BFCPAttr(type=AttrType.STATUS_INFO, mandatory=1, len=16,  # 16
+                                                   BFCPAttr(type=AttrType.REQUEST_STATUS, mandatory=1, len=4,
+                                                            value=[StatusCode.Granted, 0]),  # 4
+                                                   BFCPAttr(type=AttrType.STATUS_INFO, mandatory=1, len=18,  # 20
                                                             value='status info text')
                                                ]),
                                       BFCPAttr(type=AttrType.FLOOR_REQUEST_STATUS, mandatory=1, len=4, value=2),  # 4
