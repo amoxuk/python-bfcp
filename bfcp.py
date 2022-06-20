@@ -55,8 +55,6 @@ class AttrType:
         FLOOR_REQUEST_ID: 4,
         PRIORITY: 4,
         REQUEST_STATUS: 4,
-        ERROR_CODE: 4,
-        ERROR_INFO: 4,
         PARTICIPANT_PROVIDED_INFO: 4,
         USER_DISPLAY_NAME: 4,
         USER_URI: 4,
@@ -303,14 +301,27 @@ class BFCPAttr(dpkt.Packet):
             if AttrType.SUPPORTED_ATTRIBUTES == self.type:
                 self.value = [d << 1 for d in self.value]
             data += struct.pack(f'!{len(self.value)}B', *self.value)
-        elif self.type == AttrType.STATUS_INFO:
-            self.value = b''
-            pass
+        elif self.type in (AttrType.STATUS_INFO, AttrType.ERROR_INFO):
+            if isinstance(self.value, str):
+                data = self.value.encode()
+            else:
+                data = b''
+        elif self.type == AttrType.ERROR_CODE:
+            # code=4, v = [code, [type,r],[type,r],[type,r]] ,r=0
+            # code!=4, v= [code,] or v=code
+            if isinstance(self.value, int):
+                data = struct.pack('!B', self.value)
+            else:
+                data = struct.pack('!B', self.value[0])
+                unknown_type = [u[0] << 1 for u in self.value[1:]]
+                data += struct.pack(f'!{len(unknown_type)}B', *unknown_type)
         else:
             data += struct.pack(f'!{len(self.value)}B', *self.value)
         length = self.__hdr_len__ + len(data)
         length = get_should_len(length) - length
-        return self.pack_hdr() + data + b'\x00' * length
+        child = self.child if isinstance(self.child, list) else [self.child, ]
+        child = b''.join(bytes(child) for child in child)
+        return self.pack_hdr() + data + b'\x00' * length + child
 
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
@@ -322,8 +333,10 @@ class BFCPAttr(dpkt.Packet):
             self.real_len = buf[1]
         elif self.type in AttrType.SHOULD_LEN:
             self.real_len = 4
-        elif self.type == AttrType.STATUS_INFO:
+        elif self.type in (AttrType.STATUS_INFO, AttrType.ERROR_INFO):
             # with none child
+            self.real_len = buf[1]
+        elif self.type == AttrType.ERROR_CODE:
             self.real_len = buf[1]
         # if get_should_len(self.real_len) == len(buf):
         data = self.data[0:self.real_len - self.__hdr_len__]
@@ -335,9 +348,15 @@ class BFCPAttr(dpkt.Packet):
             value = struct.unpack('!H', data)[0]
         elif self.type == AttrType.REQUEST_STATUS:
             value = list(struct.unpack('!2B', data))
-        elif self.type == AttrType.STATUS_INFO:
+        elif self.type in (AttrType.STATUS_INFO, AttrType.ERROR_INFO):
             # with none child
             value = data.decode()
+        elif self.type == AttrType.ERROR_CODE:
+            value = list(struct.unpack(f'!{len(data)}B', data))  # code
+            if value[0] != 4:
+                value = value[0]
+            else:
+                value = value[0:1] + [[u >> 1, 0] for u in value[1:]]
         if get_should_len(self.real_len) != len(buf):
             current = get_should_len(self.real_len)
             pos = 0
@@ -564,19 +583,6 @@ def test_floor_request_status():
                                               ])])
     assert bytes(p) == s
 
-    # def test_error():
-    #     p = BFCP()
-    #     p.ver = 1
-    #     p.r = 1
-    #     p.primitive = Primitive.Error
-    #     p.conf = 16974375
-    #     p.len = 4
-    #     p.trans = 23353
-    #     p.user = 552
-    #     p.attrs = BFCPAttr(type=AttrType.PARTICIPANT_PROVIDED_INFO, mandatory=1, len=4,
-    #                        value='this is a PARTICIPANT_PROVIDED_INFO')
-    #
-
 
 def test_status_info():
     s = unhexlify(
@@ -640,3 +646,116 @@ def test_status_info():
     #                                                  value=1)
     #                                         ])])
     # assert bytes(p) == s
+
+
+def test_user_uri():
+    pass
+
+
+def test_user_display_name():
+    pass
+
+
+def test_participant_provided_info():
+    pass
+
+
+def test_error_info():
+    s = unhexlify('0f'
+                  '25'
+                  '746869732069732061205041525449434950414e545f50524f56494445445f494e464f'
+                  '000000')
+    p = BFCPAttr(type=AttrType.ERROR_INFO, mandatory=1, len=37,
+                 value='this is a PARTICIPANT_PROVIDED_INFO')  # 35
+    assert bytes(p) == s
+    b = BFCPAttr(s)
+    assert b.value == 'this is a PARTICIPANT_PROVIDED_INFO'
+    assert b.type == AttrType.ERROR_INFO
+    assert b.len == 37
+    s = unhexlify('0d'  # attr type mandatory
+                  '14'  # attr length 
+                  '0200'  # error type 2
+                  '0f'  # attr type mandatory 
+                  '10'  # attr length     
+                  '75736572'
+                  '206e6f74'
+                  '20657869'
+                  '7374'  # 用户不存在
+                  )
+    p = BFCPAttr(type=AttrType.ERROR_CODE, mandatory=1, len=20,
+                 value=2,
+                 child=BFCPAttr(type=AttrType.ERROR_INFO, mandatory=1, len=16, value='user not exist'))
+    assert bytes(p) == s
+
+
+def test_error_code():
+    s = unhexlify('0d'
+                  '04'
+                  '01'
+                  '00')
+
+    p = BFCPAttr(type=AttrType.ERROR_CODE, mandatory=1, len=4,
+                 value=1)
+    assert bytes(p) == s
+    b = BFCPAttr(s)
+    assert b.type == AttrType.ERROR_CODE
+    assert b.mandatory == 1
+    assert b.len == 4
+    assert b.value == 1
+
+
+def test_error_code_four():
+    s = unhexlify('0d'
+                  '0a'
+                  '04'
+                  '02'  # unknown type. R
+                  '04'  # unknown type. R
+                  '06'  # unknown type. R
+                  '08'  # unknown type. R
+                  '0a'  # unknown type. R
+                  '0c'  # unknown type. R
+                  '0e'  # unknown type. R
+                  '00'  # padding
+                  '00'  # padding
+                  )
+    p = BFCPAttr(type=AttrType.ERROR_CODE, mandatory=1, len=10,
+                 value=[4, [1, 0], [2, 0], [3, 0], [4, 0], [5, 0], [6, 0], [7, 0]])
+    assert bytes(p) == s
+    b = BFCPAttr(s)
+    assert b.type == AttrType.ERROR_CODE
+    assert b.mandatory == 1
+    assert b.len == 10
+    assert b.value == [4, [1, 0], [2, 0], [3, 0], [4, 0], [5, 0], [6, 0], [7, 0]]
+
+
+def test_error():
+    s = unhexlify(
+        '30'
+        '0d'  # error
+        '0006'  # payload length
+        '01030227'  # conf
+        '5B39'  # trans
+        '0228'  # user
+        '0d'  # attr type mandatory
+        '18'  # attr length 
+        '0200'  # error type 2
+        '0f'  # attr type mandatory 
+        '11'  # attr length 17     
+        'e794a8e6'
+        '88b7e4b8'
+        '8de5ad98'
+        'e59ca8'
+        '000000'  # 用户不存在
+    )
+    p = BFCP()
+    p.ver = 1
+    p.f = 0
+    p.r = 1
+    p.primitive = Primitive.Error
+    p.conf = 16974375
+    p.len = 5
+    p.trans = 23353
+    p.user = 552
+    p.attrs = BFCPAttr(type=AttrType.ERROR_CODE, mandatory=1, len=24, value=2,
+                       child=BFCPAttr(type=AttrType.ERROR_INFO, mandatory=1, len=17, value='用户不存在'))
+    assert bytes(p) == s
